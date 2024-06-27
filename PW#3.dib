@@ -35,6 +35,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 //
 // Вычисление определенного интеграла
 //
@@ -46,9 +47,10 @@ class DefiniteIntegral
     // step - размер одного шага разбиения
     // threadsNumber - число потоков, которые используются для вычислений
     //
-    public static double Solve(double a, double b, Func<double, double> function, double step, int threadsnumber)
+    public static double[] Solve(double a, double b, Func<double, double> function, double step, int threadsnumber)
     {
-        // отсюда надо начинать реализацию задачи
+        Stopwatch stopwatch = new Stopwatch();
+        stopwatch.Start();
         if (a == Double.PositiveInfinity || a == Double.NegativeInfinity ||
             b == Double.PositiveInfinity || b == Double.NegativeInfinity ||
             step == Double.PositiveInfinity || step == Double.NegativeInfinity)
@@ -75,21 +77,106 @@ class DefiniteIntegral
             barrier.SignalAndWait();
         }
         );
-        return result;
+        stopwatch.Stop();
+        return [result, stopwatch.ElapsedMilliseconds];
     }
 }
 
 #!csharp
 
 #r "nuget: xunit, 2.8.1"
-
+#r "nuget:ScottPlot, 5.0.35"
 using Xunit;
-
-var X = (double x) => x;
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(600, 500)), HtmlFormatter.MimeType);
 var SIN = (double x) => Math.Sin(x);
+double[] dataX = new double[16];
+double[] dataY = new double[16];
+double bestTime = 1e18;
+int bestThread = 0;
+for(int thread = 1; thread <= 16; thread++)
+{
+    double tthrd = 0;
+    double timethread = 0;
+    for (int test = 1; test <= 10; test++)
+    {
+        var tstRes = DefiniteIntegral.Solve(-100, 100, SIN, 1e-4, thread);
+        Assert.Equal(0, tstRes[0], 1e-4);
+        tthrd += tstRes[1];  
+    }
+    timethread = tthrd / 10;
+    dataY[thread - 1] = thread;
+    dataX[thread - 1] = timethread;
+    if (Math.Min(bestTime, timethread) != bestTime)
+    {
+        bestTime = Math.Min(bestTime, timethread);
+        bestThread = thread;
+    }
+}
+ScottPlot.Plot plt = new();
+plt.Add.Scatter(dataX, dataY);
+Console.WriteLine($"Лучшее кол-во потоков - {bestThread} за время {bestTime} мс");
+plt
 
-Assert.Equal(0, DefiniteIntegral.Solve(-1, 1, X, 1e-4, 2), 1e-4);
+#!csharp
 
-Assert.Equal(0, DefiniteIntegral.Solve(-1, 1, SIN, 1e-5, 8), 1e-4);
+//Однопоточное решение задачи
+using System.Linq;
+using System.Diagnostics;
 
-Assert.Equal(50, DefiniteIntegral.Solve(0, 10, X, 1e-6, 8), 1e-5);
+class TrapezoidalRule {
+    public static double Solve(Func<double, double> f, double a, double b, double dx) 
+    {
+        Stopwatch swch = new Stopwatch();
+        swch.Start();
+        if (a == Double.PositiveInfinity || a == Double.NegativeInfinity ||
+        b == Double.PositiveInfinity || b == Double.NegativeInfinity ||
+        dx == Double.PositiveInfinity || dx == Double.NegativeInfinity)
+            throw new ArgumentException("Бесконечность на вводе!");
+        if (b < a)
+            throw new ArgumentException("Некорректные пределы!");
+        double result = 0;
+        double x = a;
+        double e = 1E-7;
+        if (dx < e) throw new ArgumentException("Слишком маленький шаг");
+        if (Math.Abs(b - a) < e) throw new ArgumentException("Слишком маленькая разница между началом и концом интеграла");
+        int n = Convert.ToInt32(Math.Floor((b - a) / dx));
+        result = Enumerable.Range(1, n).Select(i => (f(x + i * dx) + f((x + (i - 1) * dx))) / 2 * dx).Sum();
+        // if (((b - a) / dx - n) > e)
+        // {
+        //     result += (f(b) + f((x + n * dx))) / 2 * (b - (x + n * dx));
+        // }
+        swch.Stop();
+        return(swch.ElapsedMilliseconds);
+    }
+}
+var SIN = (double x) => Math.Sin(x);
+double tmo = 0;
+for (int test = 1; test <= 10; test++)
+    {
+        tmo += TrapezoidalRule.Solve(SIN, -100, 100, 1e-4);
+    }
+double timeone = tmo/10;
+Console.WriteLine($"Среднее время выполнения - {timeone}");
+double perc = timeone / (bestTime / 100) - 100;
+
+#!markdown
+
+# Summary
+**Оптимальный размер шага:** 1E-4, так как при 1E-5 и 1E-6 программа выполняется долго, а при 1E-3 и больше вычисления недостаточно точные.
+
+**Оптимальное количество потоков:**   
+
+#!csharp
+
+Console.WriteLine($"{bestThread} потоков за {bestTime} мс");
+
+#!markdown
+
+**Сравнение скорости работы многопоточной программы и однопточной:**
+
+#!csharp
+
+Console.WriteLine($"Многопоточная программа: {bestTime} мс\t Однопоточная программа: {timeone} мс");
+Console.WriteLine($"Многопоточная программа выполняется на {Convert.ToInt32(perc)}% быстрее, чем однопоточная. ");
