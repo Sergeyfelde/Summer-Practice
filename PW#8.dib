@@ -35,11 +35,164 @@
 
 #!csharp
 
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
+public interface ICommand
+{
+    string Name { get; }
+    void Execute();
+}
+
 public interface IScheduler
 {
-    bool HasCommand()
+    bool HasCommand();
     ICommand Select();
     void Add(ICommand cmd);
+}
+
+public class ServerThread
+{
+    private IScheduler scheduler;
+    private Thread thread;
+    private bool running = true;
+
+    public ServerThread(IScheduler scheduler)
+    {
+        this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+        thread = new Thread(Run);
+        thread.Start();
+    }
+
+    private void Run()
+    {
+        while (running)
+        {
+            if (scheduler.HasCommand())
+            {
+                ICommand command = scheduler.Select();
+                try
+                {
+                    command.Execute();
+                }
+                catch (Exception ex)
+                {
+                    ExceptionHandler(command, ex);
+                }
+            }
+        }
+    }
+
+    public void Stop()
+    {
+        running = false;
+        if (Thread.CurrentThread != thread)
+        {
+            thread.Join();
+        }
+    }
+
+    private void ExceptionHandler(ICommand command, Exception ex)
+    {
+        Console.WriteLine($"Исключение в команде {command.Name}: {ex.Message}");
+    }
+}
+
+public class RoundRobinScheduler : IScheduler
+{
+    private ConcurrentQueue<ICommand> queueCmd = new ConcurrentQueue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return !queueCmd.IsEmpty;
+    }
+
+    public ICommand Select()
+    {
+        if (queueCmd.TryDequeue(out ICommand command))
+        {
+            return command;
+        }
+        return null;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        queueCmd.Enqueue(cmd);
+    }
+}
+
+public class ScheduledCommand : ICommand
+{
+    private ICommand command;
+    private IScheduler scheduler;
+    private int countEx;
+    private int maxEx;
+    public string Name => command.Name;
+
+    public ScheduledCommand(ICommand command, IScheduler scheduler, int maxEx)
+    {
+        this.command = command ?? throw new ArgumentNullException(nameof(command));
+        this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+        this.maxEx = maxEx;
+        countEx = 0;
+    }
+
+    public void Execute()
+    {
+        command.Execute();
+        countEx++;
+        if (countEx < maxEx)
+        {
+            scheduler.Add(this);
+        }
+    }
+}
+
+public class TestCommand : ICommand
+{
+    public string Name { get; }
+    private int countEx = 0;
+    private int maxEx;
+
+    public TestCommand(string name, int maxEx)
+    {
+        Name = name;
+        this.maxEx = maxEx;
+    }
+
+    public void Execute()
+    {
+        Console.WriteLine($"Команда {Name} выполняется. Выполнение номер {++countEx}.");
+        if (countEx >= maxEx)
+        {
+            Console.WriteLine($"\tКоманда {Name} достигла максимального количества выполнений.");
+        }
+    }
+}
+
+//Пример
+IScheduler scheduler = new RoundRobinScheduler();
+ServerThread serverThread = new ServerThread(scheduler);
+//Добавление команд в планировщик
+for (int i = 1; i <= 2; i++)
+{
+    ICommand testCmd = new TestCommand($"cmd_{i}", 3);
+    ICommand scheduledCmd = new ScheduledCommand(testCmd, scheduler, 3);
+    scheduler.Add(scheduledCmd);
+}
+    for (int i = 3; i <= 4; i++)
+{
+    ICommand testCmd = new TestCommand($"cmd_{i}", 1);
+    ICommand scheduledCmd = new ScheduledCommand(testCmd, scheduler, 1);
+    scheduler.Add(scheduledCmd);
+}
+    for (int i = 5; i <= 6; i++)
+{
+    ICommand testCmd = new TestCommand($"cmd_{i}", 2);
+    ICommand scheduledCmd = new ScheduledCommand(testCmd, scheduler, 2);
+    scheduler.Add(scheduledCmd);
 }
 
 #!markdown
