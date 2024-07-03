@@ -37,10 +37,178 @@
 Для этого следует использовать условные события, которые позволят убедиться, что оба потока запустились и готовы читать и писать объекты и только потом запускать таймер.
 2. Для итогового вывода сравнивать усредненные значения.
 
-#!markdown
+#!csharp
 
-// здесь писать код
+#r "nuget:ScottPlot, 5.0.35"
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.DotNet.Interactive.Formatting;
+const int items = 1000000;
+const int tests = 10;
+static ManualResetEvent prodReady = new ManualResetEvent(false);
+static ManualResetEvent consReady = new ManualResetEvent(false);
+double[] timeBlockingCollection = BlockingCollection();
+double[] timeConcurrentQueue = ConcurrentQueue();
+double[] timeQueue = Queue();
+double avTimeBlockingCollection = timeAverage(timeBlockingCollection);
+double avTimeConcurrentQueue = timeAverage(timeConcurrentQueue);
+double avTimeQueue = timeAverage(timeQueue);
+Console.WriteLine($"Среднее время BlockingCollection: {avTimeBlockingCollection} мс");
+int percBlockingCollection = Convert.ToInt32((avTimeQueue / avTimeBlockingCollection - 1) * 100);
+int percConcurrentQueue = Convert.ToInt32((avTimeQueue / avTimeConcurrentQueue - 1) * 100);
+
+static double timeAverage(double[] times)
+{
+    double fullTime = 0;
+    foreach (var time in times)
+    {
+        fullTime += time;
+    }
+    return fullTime / times.Length;
+}
+static double[] BlockingCollection()
+{
+    var times = new double[tests];
+    ManualResetEvent readyEvent = new ManualResetEvent(false);
+    Stopwatch swchBlock = new Stopwatch();
+
+    for (int i = 0; i < tests; i++)
+    {
+        times[i] = 0;
+        readyEvent.Reset();
+        var blockingCollection = new BlockingCollection<object>();
+        var producer = Task.Run(() =>
+        {
+            readyEvent.WaitOne();
+            swchBlock.Start();
+            for (int j = 0; j < items; j++)
+            {
+                blockingCollection.Add(new object());
+            }
+        }
+        );
+        var consumer = Task.Run(() =>
+        {
+            readyEvent.Set();
+            for (int j = 0; j < items; j++)
+            {
+                blockingCollection.Take();
+            }
+            swchBlock.Stop();
+            times[i] += swchBlock.ElapsedMilliseconds;
+        }
+        );
+        Task.WaitAll(producer, consumer);
+        swchBlock.Reset();
+    }
+    return times;
+}
+static double[] ConcurrentQueue()
+{
+    var times = new double[tests];
+    ManualResetEvent readyEvent = new ManualResetEvent(false);
+    Stopwatch swchConc = new Stopwatch();
+
+    for (int i = 0; i < tests; i++)
+    {
+        times[i] = 0;
+        readyEvent.Reset();
+        var concurrentQueue = new ConcurrentQueue<object>();
+        var producer = Task.Run(() =>
+        {
+            readyEvent.WaitOne();
+            swchConc.Start();
+            for (int j = 0; j < items; j++)
+            {
+                concurrentQueue.Enqueue(new object());
+            }
+        }
+        );
+        var consumer = Task.Run(() =>
+        {
+            readyEvent.Set();
+            for (int j = 0; j < items; j++)
+            {
+                concurrentQueue.TryDequeue(out _);
+            }
+            swchConc.Stop();
+            times[i] += swchConc.ElapsedMilliseconds;
+        }
+        );
+        Task.WaitAll(producer, consumer);
+        swchConc.Reset();
+    }
+    return times;
+}
+static double[] Queue()
+{
+    var times = new double[tests];
+    for (int i = 0; i < tests; i++)
+    {
+        var queue = new Queue<object>();
+        Stopwatch swchQ = new Stopwatch();
+        swchQ.Start(); // Начало измерения времени
+        for (int j = 0; j < items; j++)
+        {
+            queue.Enqueue(new object());
+        }
+        for (int j = 0; j < items; j++)
+        {
+            queue.Dequeue();
+        }
+        swchQ.Stop(); // Конец измерения времени
+        times[i] = swchQ.ElapsedMilliseconds;
+    }
+    return times;
+}
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(800, 500)), HtmlFormatter.MimeType);
+double[] blockX = timeBlockingCollection;
+double[] blockY = new double[tests];
+for(int i = 0; i < tests; i++)
+{
+    blockY[i] = i + 1;
+}
+ScottPlot.Plot block = new();
+block.Add.Scatter(blockX, blockY);
+block
+
+#!csharp
+
+Console.WriteLine($"Среднее время ConcurrentQueue: {avTimeConcurrentQueue} мс");
+double[] concX = timeConcurrentQueue;
+double[] concY = new double[tests];
+for(int i = 0; i < tests; i++)
+{
+    concY[i] = i + 1;
+}
+ScottPlot.Plot conc = new();
+conc.Add.Scatter(concX, concY);
+conc
+
+#!csharp
+
+Console.WriteLine($"Среднее время обычной очереди: {avTimeQueue} мс");
+double[] queX = timeQueue;
+double[] queY = new double[tests];
+for(int i = 0; i < tests; i++)
+{
+    queY[i] = i + 1;
+}
+ScottPlot.Plot queue = new();
+queue.Add.Scatter(queX, queY);
+queue
 
 #!markdown
 
 ## Вывод
+**Наиболее эффективная потокобезопасная коллекция:** ConcurrentQueue
+
+#!csharp
+
+if (percBlockingCollection > percConcurrentQueue) Console.WriteLine($"BlockingCollection быстрее обычной очереди на {percBlockingCollection}%");
+else if (percBlockingCollection < percConcurrentQueue) Console.WriteLine($"ConcurrentQueue быстрее обычной очереди на {percConcurrentQueue}%");
+else Console.WriteLine($"BlockingCollection и ConcurrentQueue быстрее обычной очереди на {percConcurrentQueue}%");
