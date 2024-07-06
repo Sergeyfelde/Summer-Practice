@@ -59,8 +59,33 @@ using System.Collections.Concurrent;
 
 var queue1 = new BlockingCollection<Message>(2); //очередь первого потока
 var queue2 = new BlockingCollection<Message>(2); //очередь второго потока
-
 // Здесь писать решение
+var countdown = new CountdownEvent(200);
+private void Transfer(BlockingCollection<Message> inQ, BlockingCollection<Message> outQ, CountdownEvent countdown)
+{
+    while (!inQ.IsCompleted)
+    {
+        Message mes;
+        if (inQ.TryTake(out mes))
+        {
+            mes.Handle();
+            countdown.Signal();
+            if (countdown.CurrentCount > 0)
+            {
+                outQ.Add(new Message());
+            }
+            else
+            {
+                inQ.CompleteAdding();
+                outQ.CompleteAdding();
+            }
+        }
+    }
+}
+var t1 = Task.Run(() => Transfer(queue1, queue2, countdown));
+var t2 = Task.Run(() => Transfer(queue2, queue1, countdown));
+queue1.Add(new Message());
+await Task.WhenAll(t1, t2);
 
 #!csharp
 
