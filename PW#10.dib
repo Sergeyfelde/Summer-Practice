@@ -36,3 +36,322 @@
 1. [Паттерн Сообщение](https://www.enterpriseintegrationpatterns.com/patterns/messaging/Message.html)
 2. [Паттерн Роутер - весь раздел про Роутеры](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageRoutingIntro.html)
 3. [Обмен сообщеними](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageConstructionIntro.html)
+
+#!csharp
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading;
+
+
+public interface ICommand
+{
+    string Name { get; }
+    void Execute();
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select(ServerThread serverThread);
+    void Add(ICommand cmd);
+    public void SetRouter(Router router);
+}
+
+public class TestCommand : ICommand
+{
+    private int id;
+    private int counter = 0;
+    private int maxCounter;
+    private bool isCompleted = false;
+    private ServerThread server;
+
+    public string Name => $"TestCommand {id}";
+
+    public TestCommand(int id, int maxCounter, ServerThread server)
+    {
+        this.id = id;
+        this.maxCounter = maxCounter;
+        this.server = server ?? throw new ArgumentNullException(nameof(server));
+    }
+
+    public void Execute()
+    {
+        if (!isCompleted)
+        {
+            Console.WriteLine($"Поток {id} вызов {++counter}");
+            server.IncrementCommandCount();
+            if (counter >= maxCounter)
+            {
+                isCompleted = true;
+                Console.WriteLine($"\tПоток {id} завершил выполнение.");
+
+            }
+        }
+    }
+}
+
+public class ServerThread
+{
+    private IScheduler scheduler;
+    private Thread thread;
+    public bool running = true;
+    public ManualResetEvent manualResetEvent = new ManualResetEvent(false);
+    private int commandCount = 0;
+    private int hardStopTriggerCount;
+    private bool hardStopAdded = false;
+
+    public ServerThread(IScheduler scheduler, int hardStopTriggerCount)
+    {
+        this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+        this.hardStopTriggerCount = hardStopTriggerCount;
+        thread = new Thread(Run);
+        thread.Start();
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        if (command == null) throw new ArgumentNullException(nameof(command));
+        scheduler.Add(command);
+        manualResetEvent.Set();
+    }
+
+    public void IncrementCommandCount()
+    {
+        commandCount++;
+        //Console.WriteLine($"commandCount увеличен: {commandCount}");
+        if (commandCount >= hardStopTriggerCount && !hardStopAdded)
+        {
+            Console.WriteLine("Добавление HardStop в очередь");
+            scheduler.Add(new HardStop(this));
+            hardStopAdded = true;
+        }
+    }
+
+    private void Run()
+    {
+        while (running)
+        {
+            manualResetEvent.WaitOne();
+            manualResetEvent.Reset();
+
+            while (running && scheduler.HasCommand())
+            {
+                ICommand command = scheduler.Select(this);
+                try
+                {
+                    command.Execute();
+                }
+                catch (Exception ex)
+                {
+                    ExceptionHandler(command, ex);
+                }
+            }
+        }
+    }
+
+    public void Stop()
+    {
+        running = false;
+        manualResetEvent.Set();
+        thread.Join();
+    }
+
+    private void ExceptionHandler(ICommand command, Exception ex)
+    {
+        Console.WriteLine($"Исключение в команде {command.Name}: {ex.Message}");
+    }
+
+    public void ProcessMessage(Message message)
+    {
+        Console.WriteLine($"Обработка сообщения: {message.Data}");
+    }
+}
+
+public class HardStop : ICommand
+{
+    private ServerThread serverThread;
+    public string Name => "HardStop";
+
+    public HardStop(ServerThread serverThread)
+    {
+        this.serverThread = serverThread ?? throw new ArgumentNullException(nameof(serverThread));
+    }
+
+    public void Execute()
+    {
+        Console.WriteLine("Выполнение команды: HardStop");
+        serverThread.Stop();
+    }
+}
+
+public class RoundRobinScheduler : IScheduler
+{
+    private ConcurrentQueue<ICommand> queueCmd = new ConcurrentQueue<ICommand>();
+    private bool immediateHardStop = false;
+    private Router router;
+
+    public void SetRouter(Router router)
+    {
+        this.router = router ?? throw new ArgumentNullException(nameof(router));
+    }
+
+    public bool HasCommand()
+    {
+        return !queueCmd.IsEmpty || immediateHardStop;
+    }
+
+    public ICommand Select(ServerThread serverThread)
+    {
+        if (immediateHardStop)
+        {
+            immediateHardStop = false;
+            return new HardStop(serverThread);
+        }
+
+        if (queueCmd.TryDequeue(out ICommand command))
+        {
+            return command;
+        }
+        return null;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        if (cmd is HardStop)
+        {
+            immediateHardStop = true;
+        }
+        else
+        {
+            queueCmd.Enqueue(cmd);
+            router.RegisterCommand(cmd.Name, cmd);
+        }
+    }
+}
+
+
+public class ScheduledCommand : ICommand
+{
+    private ICommand command;
+    private IScheduler scheduler;
+    private int countEx;
+    private int maxEx;
+    public string Name => command.Name;
+
+    public ScheduledCommand(ICommand command, IScheduler scheduler, int maxEx)
+    {
+        this.command = command ?? throw new ArgumentNullException(nameof(command));
+        this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+        this.maxEx = maxEx;
+        countEx = 0;
+    }
+
+    public void Execute()
+    {
+        command.Execute();
+        countEx++;
+        //Console.WriteLine($"Выполнение команды: {this.GetType().Name}");
+        if (countEx < maxEx)
+        {
+            scheduler.Add(this);
+        }
+    }
+}
+
+public class Message
+{
+    public string CmdId { get; set; }
+    public string Data { get; set; }
+}
+
+public class Router : ICommand
+{
+    private IScheduler scheduler;
+    private ServerThread serverThread;
+
+    private ConcurrentDictionary<string, ICommand> commands;
+    private ConcurrentQueue<Message> messageQueue;
+
+    public string Name => "Router";
+
+    public Router(IScheduler scheduler, ServerThread serverThread)
+    {
+        this.scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+        commands = new ConcurrentDictionary<string, ICommand>();
+        messageQueue = new ConcurrentQueue<Message>();
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        while (!messageQueue.IsEmpty)
+        {
+            if (messageQueue.TryDequeue(out Message message))
+            {
+                if (commands.TryGetValue(message.CmdId, out ICommand command))
+                {
+                    ICommand cmd = new MessageCommand(message, serverThread);
+                    scheduler.Add(cmd);
+                }
+                else
+                {
+                    Console.WriteLine($"Сообщение для неизвестной команды {message.CmdId} не может быть доставлено");
+                }
+            }
+        }
+    }
+
+    public void RegisterCommand(string cmdId, ICommand command)
+    {
+        Console.WriteLine($"Добавление команды: {cmdId}");
+        commands.TryAdd(cmdId, command);
+    }
+
+    public void UnregisterCommand(string cmdId)
+    {
+        commands.TryRemove(cmdId, out _);
+    }
+
+    public void EnqueueMessage(Message message)
+    {
+        messageQueue.Enqueue(message);
+    }
+}
+
+public class MessageCommand : ICommand
+{
+    private Message message;
+    private ServerThread serverThread;
+
+    public string Name => $"MessageCommand for {message.CmdId}";
+
+    public MessageCommand(Message message, ServerThread serverThread)
+    {
+        this.message = message ?? throw new ArgumentNullException(nameof(message));
+        this.serverThread = serverThread ?? throw new ArgumentNullException(nameof(serverThread));
+    }
+
+    public void Execute()
+    {
+        serverThread.ProcessMessage(message);
+    }
+}
+
+//Пример
+int hardStopTriggerCount = 6;
+IScheduler scheduler = new RoundRobinScheduler();
+ServerThread serverThread = new ServerThread(scheduler, hardStopTriggerCount);
+Router router = new Router(scheduler, serverThread);
+scheduler.SetRouter(router);
+ICommand testCmd1 = new TestCommand(1, 3, serverThread);
+ICommand testCmd2 = new TestCommand(2, 3, serverThread);
+ICommand scheduledCmd = new ScheduledCommand(testCmd1, scheduler, 3);
+serverThread.EnqueueCommand(scheduledCmd);
+ICommand scheduledCmd2 = new ScheduledCommand(testCmd2, scheduler, 3);
+serverThread.EnqueueCommand(scheduledCmd2);
+router.EnqueueMessage(new Message { CmdId = "TestCommand 1", Data = "Данные для Cmd1" });
+router.EnqueueMessage(new Message { CmdId = "TestCommand 2", Data = "Данные для Cmd2" });
+router.EnqueueMessage(new Message { CmdId = "UnknownCommand", Data = "Данные для UnknownCommand" });
+router.Execute();
