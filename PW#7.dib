@@ -17,10 +17,109 @@
 
 #!csharp
 
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
 public interface ICommand
 {
     void Execute();
+    string Name { get; }
 }
+
+public class ServerThread
+{
+    private ConcurrentQueue<ICommand> commands = new ConcurrentQueue<ICommand>();
+    private Thread thread;
+    private bool running = true;
+    public Thread Thread => thread;
+    public bool IsEmpty => commands.IsEmpty;
+
+    public ServerThread()
+    {
+        thread = new Thread(Run);
+        thread.Start();
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        if (command == null) throw new ArgumentNullException(nameof(command));
+        commands.Enqueue(command);
+    }
+
+    private void Run()
+    {
+        while (running)
+        {
+            if (commands.TryDequeue(out ICommand command))
+            {
+                try
+                {
+                    command.Execute();
+                }
+                catch (Exception ex)
+                {
+                    ExceptionHandler(command, ex);
+                }
+            }
+        }
+    }
+    
+    public void Stop()
+    {
+        running = false;
+        thread.Join();
+    }
+
+    private void ExceptionHandler(ICommand command, Exception ex)
+    {
+        Console.WriteLine($"Исключение в Команде {command.Name}: {ex.Message}");
+    }
+}
+
+public class HardStop: ICommand
+{
+    private ServerThread servThread;
+    public string Name => "HardStop";
+    public HardStop(ServerThread serverThread)
+    {
+        servThread = serverThread ?? throw new ArgumentNullException(nameof(serverThread));
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != servThread.Thread)
+            throw new InvalidOperationException("HardStop может быть выполнен только из потока, которым владеет ServerThread.");
+        servThread.Stop();
+    }
+}
+
+public class SoftStop : ICommand
+{
+    private ServerThread servThread;
+    public string Name => "SoftStop";
+    public SoftStop(ServerThread serverThread)
+    {
+        servThread = serverThread ?? throw new ArgumentNullException(nameof(serverThread));
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != servThread.Thread)
+            throw new InvalidOperationException("SoftStop может быть выполнен только из потока, которым владеет ServerThread.");
+        while (!servThread.IsEmpty)
+        {
+            Thread.Sleep(10);
+        }
+        servThread.Stop();
+    }
+}
+
+//Примеры
+ServerThread server1 = new ServerThread();
+ServerThread server2 = new ServerThread();
+server1.EnqueueCommand(new HardStop(server1));
+server2.EnqueueCommand(new SoftStop(server2));
 
 #!markdown
 
